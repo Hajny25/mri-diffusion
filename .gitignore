@@ -1,0 +1,8 @@
+venv
+.idea
+slurm-*.out
+.env
+.ipynb_checkpoints
+mlruns
+perun_results
+ddpm*/samples
