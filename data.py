@@ -21,7 +21,6 @@ class BratsSliceDataset(torch.utils.data.Dataset):
         self.transforms = transforms
         self.slice_axis = slice_axis
         self.slices_per_case = slices_per_case
-        self.slice_margin = slice_margin
         self.modalities = modalities
         self.max_cases = max_cases
         self.samples = self._index_cases()
@@ -29,7 +28,6 @@ class BratsSliceDataset(torch.utils.data.Dataset):
             raise RuntimeError(f"No BRATS2021 samples found under {self.root_dir}")
 
     def _index_cases(self) -> list[tuple[Path, int]]:
-        print("Indexing BRATS2021 cases...")
         entries = sorted([p for p in self.root_dir.iterdir() if p.is_dir()])
         if self.max_cases is not None:
             entries = entries[: self.max_cases]
@@ -38,7 +36,9 @@ class BratsSliceDataset(torch.utils.data.Dataset):
             ref_path = self._resolve_modality_path(case_dir, self.modalities[0])
             ref_data = nib.load(ref_path).get_fdata()
             num_slices = ref_data.shape[self.slice_axis]
-            usable = range(self.slice_margin, max(self.slice_margin + 1, num_slices - self.slice_margin))
+            center_slice = num_slices // 2
+            offset = self.slices_per_case // 2
+            usable = range(center_slice - offset, center_slice + offset)
             slice_ids = np.linspace(
                 usable.start,
                 usable.stop - 1,
@@ -69,7 +69,6 @@ class BratsSliceDataset(torch.utils.data.Dataset):
         max_val = slice_2d.max()
         if max_val > 0:
             slice_2d /= max_val
-        slice_rgb = np.stack([slice_2d] * 3, axis=-1)
-        pil_img = Image.fromarray((slice_rgb * 255).astype(np.uint8))
+        pil_img = Image.fromarray((slice_2d * 255).astype(np.uint8))
         tensor = self.transforms(pil_img) if self.transforms else transforms.ToTensor()(pil_img)
         return {"images": tensor}

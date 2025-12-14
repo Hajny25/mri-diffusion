@@ -2,6 +2,7 @@ import os
 import math
 from dataclasses import dataclass, asdict
 
+import accelerate.utils
 import mlflow
 import perun
 from perun.data_model.data import DataNode, MetricType
@@ -14,7 +15,6 @@ from diffusers import UNet2DModel, DDPMScheduler, DDPMPipeline
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from diffusers.utils import make_image_grid
 from accelerate import Accelerator
-from tqdm.auto import tqdm
 from pathlib import Path
 
 from data import BratsSliceDataset
@@ -42,7 +42,6 @@ class TrainingConfig:
     scheduler: str = "DDPMScheduler"
     slice_axis: int = 2
     slices_per_case: int = 12
-    slice_margin: int = 10
     modalities: tuple[str] = ("flair",)
     dataloader_workers: int = 8 if not DEBUG else 0
     num_train_timesteps: int = 1000 if not DEBUG else 10
@@ -75,6 +74,16 @@ for i in range(torch.cuda.device_count()):
     props = torch.cuda.get_device_properties(i)
     print(f"[GPU {i}] {props.name}, {props.total_memory / (1024 ** 3):.1f} GB")
 
+
+# Initialize accelerator
+accelerator = Accelerator(
+    mixed_precision=config.mixed_precision,
+    gradient_accumulation_steps=config.gradient_accumulation_steps,
+)
+
+accelerator.print("=== Accelerator State ===")
+accelerator.print(accelerator.state)
+
 # -------------------------------------------------------------------
 # Dataset and DataLoaders
 # -------------------------------------------------------------------
@@ -90,20 +99,14 @@ preprocess = transforms.Compose(
     ]
 )
 
-print("Creating training dataset...")
-
 train_dataset = BratsSliceDataset(
     root_dir=BRATS_ROOT,
     transforms=preprocess,
     slice_axis=config.slice_axis,
     slices_per_case=config.slices_per_case,
-    slice_margin=config.slice_margin,
     modalities=config.modalities,
     max_cases=None if not DEBUG else 1
 )
-print(f"Training dataset size: {len(train_dataset)}")
-
-print("Creating training dataloader...")
 train_dataloader = torch.utils.data.DataLoader(
     train_dataset,
     batch_size=config.train_batch_size,
@@ -116,22 +119,16 @@ train_dataloader = torch.utils.data.DataLoader(
 # Create a UNet2DModel
 model = UNet2DModel(
     sample_size=config.image_size,  # the target image resolution
-    in_channels=3,  # the number of input channels, 3 for RGB images
-    out_channels=3,  # the number of output channels
+    in_channels=1,  # the number of input channels, 3 for RGB images
+    out_channels=1,  # the number of output channels
     layers_per_block=2,  # how many ResNet layers to use per UNet block
-    block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
+    block_out_channels=(128, 256, 512),  # the number of output channels for each UNet block
     down_block_types=(
         "DownBlock2D",  # a regular ResNet downsampling block
         "DownBlock2D",
         "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
-        "DownBlock2D",
     ),
     up_block_types=(
-        "UpBlock2D",  # a regular ResNet upsampling block
-        "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
-        "UpBlock2D",
         "UpBlock2D",
         "UpBlock2D",
         "UpBlock2D",
@@ -162,7 +159,7 @@ def evaluate(config, epoch, pipeline):
     grid_dims = int(math.sqrt(len(images))) if not DEBUG else 1
 
     # Make a grid out of the images
-    image_grid = make_image_grid(images, rows=grid_dims, cols=grid_dims)  # todo dynamic rows/cols based on eval_batch_size
+    image_grid = make_image_grid(images, rows=grid_dims, cols=grid_dims)
 
     # Save the images
     test_dir = os.path.join(output_dir, "samples")
@@ -174,18 +171,9 @@ def evaluate(config, epoch, pipeline):
     data_out=str(BASE_DIR / "perun_results"),
     format="json",
 )
-def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler):
+def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id):
     # (2) add the data collected by perun to mlflow
     perun.register_callback(log_perun_metrics_to_mlflow)
-
-    # Initialize accelerator and tensorboard logging
-    accelerator = Accelerator(
-        mixed_precision=config.mixed_precision,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-    )
-
-    print("=== Accelerator State ===")
-    print(accelerator.state)
 
     # Prepare everything
     # There is no specific order to remember, you just need to unpack the
@@ -196,17 +184,16 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
     global_step = 0
     # (1) log params in mlflow
-    mlflow.log_params(config_dict)
+    if accelerator.is_main_process:
+        mlflow.log_params(config_dict, run_id=run_id)
 
     # Now you train the model
     for epoch in range(config.num_epochs):
-        #progress_bar = tqdm(total=len(train_dataloader), disable=not accelerator.is_local_main_process, ascii=True)
-        #progress_bar.set_description(f"Epoch {epoch}")
-        print("")
-        print(f"Epoch {epoch + 1}/{config.num_epochs} ---------------------")
+        accelerator.print("")
+        accelerator.print(f"Epoch {epoch + 1}/{config.num_epochs} ---------------------")
 
         for step, batch in enumerate(train_dataloader):
-            print(f"Epoch {epoch + 1}/{config.num_epochs}: Step {step + 1}/{len(train_dataloader)}")
+            accelerator.print(f"Epoch {epoch + 1}/{config.num_epochs}: Step {step + 1}/{len(train_dataloader)}")
             clean_images = batch["images"]
             # Sample noise to add to the images
             noise = torch.randn(clean_images.shape, device=clean_images.device)
@@ -238,8 +225,8 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "step": global_step}
             #progress_bar.set_postfix(**logs)
             # (6) log the training loss and learning rate
-            mlflow.log_metric("training_loss", logs["loss"], step=global_step)
-            mlflow.log_metric("learning_rate", logs["lr"], step=global_step)
+            mlflow.log_metric("training_loss", logs["loss"], step=global_step, run_id=run_id)
+            mlflow.log_metric("learning_rate", logs["lr"], step=global_step, run_id=run_id)
 
             global_step += 1
 
@@ -248,20 +235,22 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             pipeline = DDPMPipeline(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler)
 
             if (epoch + 1) % config.save_image_epochs == 0 or epoch == config.num_epochs - 1:
-                print(f"sample demo images in epoch: {epoch + 1}")
+                accelerator.print(f"sample demo images in epoch: {epoch + 1}")
                 evaluate(config, epoch, pipeline)
 
     # (7) Log model artifact to MLflow
     torch.save(accelerator.unwrap_model(model).state_dict(), os.path.join(output_dir, "unet_weights.pth"))
 
-    print(f"Logging model to mlflow...")
-    mlflow.log_artifacts(os.path.join(output_dir, "samples"), artifact_path="output/samples")
-    #mlflow.pytorch.log_model(accelerator.unwrap_model(model), "unet_weights")
+    if accelerator.is_main_process:
+        accelerator.print(f"Logging model to mlflow...")
+        mlflow.log_artifacts(output_dir, artifact_path="output", run_id=run_id)
+        #mlflow.pytorch.log_model(accelerator.unwrap_model(model), "unet_weights")
 
 
 # -------------------------------------------------------------------
 # Perun ↔ MLflow bridge
 # -------------------------------------------------------------------
+@accelerator.on_local_main_process
 def log_perun_metrics_to_mlflow(root: DataNode) -> None:
     print("Logging Perun metrics to MLflow...")
     cfg = getattr(perun, "config", None)
@@ -311,13 +300,22 @@ def log_perun_metrics_to_mlflow(root: DataNode) -> None:
 def main():
     mlflow.set_experiment("basic_training_diffusion_mlflow_perun")  # (2) MLFLOW: set the experiment name
 
-    with mlflow.start_run() as active_run:
-        print(f"MLflow run id: {active_run.info.run_id}")
+
+    mlflow.set_experiment("ddpm_2d")  # (2) MLFLOW: set the experiment name
+
+    run = 0
+    if accelerator.is_main_process:
+        mlflow.start_run()
+        run = mlflow.active_run().info.run_id
+        print(f"MLflow run id: {run}")
 
         global output_dir
-        output_dir = os.path.join("output", active_run.info.run_id)
+        output_dir = os.path.join("output", run)
         os.makedirs(output_dir, exist_ok=True)
-        train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler)
+
+    run_id = accelerate.utils.gather_object([run])[0]
+    print(f"{run_id=}")
+    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id)
 
 
 if __name__ == "__main__":
