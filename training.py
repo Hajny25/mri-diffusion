@@ -1,5 +1,7 @@
 import os
 import math
+import argparse
+import importlib
 from dataclasses import dataclass, asdict
 
 import accelerate.utils
@@ -10,18 +12,19 @@ from perun.processing import processDataNode
 
 import torch
 import torch.nn.functional as F
-from torchvision import transforms
-from diffusers import UNet2DModel, DDPMScheduler, DDPMPipeline
+from diffusers import DDPMScheduler, DDPMPipeline
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from diffusers.utils import make_image_grid
 from accelerate import Accelerator
 from pathlib import Path
 
-from data import BratsSliceDataset
-
 
 BASE_DIR = Path(__file__).resolve().parent
 BRATS_ROOT = Path(BASE_DIR / "data" / "brats-2021").expanduser()
+
+if not BRATS_ROOT.exists():
+    raise FileNotFoundError(f"Expected BRATS2021 data under {BRATS_ROOT}")
+
 output_dir = "output" # gets set later to include mlflow run id
 
 DEBUG = False
@@ -40,9 +43,6 @@ class TrainingConfig:
     mixed_precision: str = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
     seed: int = 0
     scheduler: str = "DDPMScheduler"
-    slice_axis: int = 2
-    slices_per_case: int = 12
-    modalities: tuple[str] = ("flair",)
     dataloader_workers: int = 8 if not DEBUG else 0
     num_train_timesteps: int = 1000 if not DEBUG else 10
     num_inference_steps = 1000 if not DEBUG else 10
@@ -83,67 +83,6 @@ accelerator = Accelerator(
 
 accelerator.print("=== Accelerator State ===")
 accelerator.print(accelerator.state)
-
-# -------------------------------------------------------------------
-# Dataset and DataLoaders
-# -------------------------------------------------------------------
-if not BRATS_ROOT.exists():
-    raise FileNotFoundError(f"Expected BRATS2021 data under {BRATS_ROOT}")
-
-preprocess = transforms.Compose(
-    [
-        transforms.Resize((config.image_size, config.image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ]
-)
-
-train_dataset = BratsSliceDataset(
-    root_dir=BRATS_ROOT,
-    transforms=preprocess,
-    slice_axis=config.slice_axis,
-    slices_per_case=config.slices_per_case,
-    modalities=config.modalities,
-    max_cases=None if not DEBUG else 1
-)
-train_dataloader = torch.utils.data.DataLoader(
-    train_dataset,
-    batch_size=config.train_batch_size,
-    num_workers=config.dataloader_workers,
-    shuffle=True,
-    persistent_workers=not DEBUG,
-    pin_memory=True,
-)
-
-# Create a UNet2DModel
-model = UNet2DModel(
-    sample_size=config.image_size,  # the target image resolution
-    in_channels=1,  # the number of input channels, 3 for RGB images
-    out_channels=1,  # the number of output channels
-    layers_per_block=2,  # how many ResNet layers to use per UNet block
-    block_out_channels=(128, 256, 512),  # the number of output channels for each UNet block
-    down_block_types=(
-        "DownBlock2D",  # a regular ResNet downsampling block
-        "DownBlock2D",
-        "DownBlock2D",
-    ),
-    up_block_types=(
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    ),
-)
-
-# Create a scheduler
-noise_scheduler = DDPMScheduler(num_train_timesteps=config.num_train_timesteps)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-lr_scheduler = get_cosine_schedule_with_warmup(
-    optimizer=optimizer,
-    num_warmup_steps=config.lr_warmup_steps,
-    num_training_steps=(len(train_dataloader) * config.num_epochs),
-)
 
 
 def evaluate(config, epoch, pipeline):
@@ -296,13 +235,8 @@ def log_perun_metrics_to_mlflow(root: DataNode) -> None:
         avg_power_w = total_energy_j / runtime_s
         log_if_not_none("perun_avg_power_watts", avg_power_w)
 
-
-def main():
-    mlflow.set_experiment("basic_training_diffusion_mlflow_perun")  # (2) MLFLOW: set the experiment name
-
-
-    mlflow.set_experiment("ddpm_2d")  # (2) MLFLOW: set the experiment name
-
+def start_mlflow_run(experiment: str) -> str:
+    mlflow.set_experiment(experiment)  # (2) MLFLOW: set the experiment name
     run = 0
     if accelerator.is_main_process:
         mlflow.start_run()
@@ -314,7 +248,40 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
 
     run_id = accelerate.utils.gather_object([run])[0]
-    print(f"{run_id=}")
+    return run_id
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    args = parser.parse_args()
+
+    model_module = importlib.import_module(f"experiments.{args.model}.model")
+    model = getattr(model_module, "create_model")(config.image_size)
+
+    dataset_module = importlib.import_module(f"experiments.{args.model}.dataset")
+    dataset = getattr(dataset_module, "create_dataset")(BRATS_ROOT, config.image_size, DEBUG)
+
+    train_dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=config.train_batch_size,
+        num_workers=config.dataloader_workers,
+        shuffle=True,
+        persistent_workers=not DEBUG,
+        pin_memory=True,
+    )
+
+    # Create a scheduler
+    noise_scheduler = DDPMScheduler(num_train_timesteps=config.num_train_timesteps)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=config.lr_warmup_steps,
+        num_training_steps=(len(train_dataloader) * config.num_epochs),
+    )
+
+    run_id = start_mlflow_run(args.model)
+
     train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id)
 
 

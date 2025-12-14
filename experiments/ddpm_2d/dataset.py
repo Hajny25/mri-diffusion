@@ -1,24 +1,35 @@
-import numpy as np
+from dataclasses import dataclass
+from pathlib import Path
+
 import nibabel as nib
+import numpy as np
 import torch
 from PIL import Image
 from torchvision import transforms
-from pathlib import Path
+
+
+@dataclass
+class DataConfig:
+    slice_axis: int = 2
+    slices_per_case: int = 12
+    modalities: tuple[str] = ("flair",)
+
+
+config = DataConfig()
 
 
 class BratsSliceDataset(torch.utils.data.Dataset):
     def __init__(
             self,
             root_dir: Path,
-            transforms: transforms.Compose,
+            image_size: int,
             slice_axis: int = 2,
             slices_per_case: int = 12,
-            slice_margin: int = 8,
             modalities: tuple[str, ...] = ("flair",),
             max_cases: int = None,
     ):
         self.root_dir = Path(root_dir)
-        self.transforms = transforms
+        self.image_size = image_size
         self.slice_axis = slice_axis
         self.slices_per_case = slices_per_case
         self.modalities = modalities
@@ -70,5 +81,25 @@ class BratsSliceDataset(torch.utils.data.Dataset):
         if max_val > 0:
             slice_2d /= max_val
         pil_img = Image.fromarray((slice_2d * 255).astype(np.uint8))
-        tensor = self.transforms(pil_img) if self.transforms else transforms.ToTensor()(pil_img)
+
+        preprocess = transforms.Compose(
+            [
+                transforms.Resize((self.image_size, self.image_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+        tensor = preprocess(pil_img)
         return {"images": tensor}
+
+
+def create_dataset(brats_root: Path, image_size: int, debug: bool):
+    return BratsSliceDataset(
+        root_dir=brats_root,
+        image_size=image_size,
+        slice_axis=config.slice_axis,
+        slices_per_case=config.slices_per_case,
+        modalities=config.modalities,
+        max_cases=None if not debug else 1
+    )
