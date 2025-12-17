@@ -33,7 +33,7 @@ DEBUG = False
 @dataclass
 class TrainingConfig:
     image_size: int = 128  # the generated image resolution
-    train_batch_size: int = 16
+    train_batch_size: int = 1
     eval_batch_size: int = 16 if not DEBUG else 1 # how many images to sample during evaluation
     num_epochs: int = 10 if not DEBUG else 1
     gradient_accumulation_steps: int = 1
@@ -107,7 +107,7 @@ def evaluate(config, epoch, pipeline):
 
 
 @perun.perun(
-    data_out=str(BASE_DIR / "perun_results"),
+    data_out=str(BASE_DIR / "perun_results" / str(accelerator.process_index)),
     format="json",
 )
 def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id):
@@ -133,7 +133,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
         for step, batch in enumerate(train_dataloader):
             accelerator.print(f"Epoch {epoch + 1}/{config.num_epochs}: Step {step + 1}/{len(train_dataloader)}")
-            clean_images = batch["images"]
+            clean_images = batch
             # Sample noise to add to the images
             noise = torch.randn(clean_images.shape, device=clean_images.device)
             bs = clean_images.shape[0]
@@ -150,7 +150,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
             with accelerator.accumulate(model):
                 # Predict the noise residual
-                noise_pred = model(noisy_images, timesteps, return_dict=False)[0]
+                noise_pred = model(noisy_images, timesteps)
                 loss = F.mse_loss(noise_pred, noise)
                 accelerator.backward(loss)
 
@@ -175,21 +175,26 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
 
             if (epoch + 1) % config.save_image_epochs == 0 or epoch == config.num_epochs - 1:
                 accelerator.print(f"sample demo images in epoch: {epoch + 1}")
-                evaluate(config, epoch, pipeline)
+                #evaluate(config, epoch, pipeline)
 
-    # (7) Log model artifact to MLflow
-    torch.save(accelerator.unwrap_model(model).state_dict(), os.path.join(output_dir, "unet_weights.pth"))
 
+    accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        torch.save(accelerator.unwrap_model(model).state_dict(), os.path.join(output_dir, "unet_weights.pth"))
         accelerator.print(f"Logging model to mlflow...")
+        # (7) Log model artifact to MLflow
         mlflow.log_artifacts(output_dir, artifact_path="output", run_id=run_id)
-        #mlflow.pytorch.log_model(accelerator.unwrap_model(model), "unet_weights")
+        print("finished logging to mlflow")
+        mlflow.pytorch.log_model(accelerator.unwrap_model(model), "unet_weights")
+        
 
+    accelerator.wait_for_everyone()
+    print("finished training")
 
 # -------------------------------------------------------------------
 # Perun ↔ MLflow bridge
 # -------------------------------------------------------------------
-@accelerator.on_local_main_process
+@accelerator.on_main_process
 def log_perun_metrics_to_mlflow(root: DataNode) -> None:
     print("Logging Perun metrics to MLflow...")
     cfg = getattr(perun, "config", None)

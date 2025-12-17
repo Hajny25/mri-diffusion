@@ -29,7 +29,7 @@ export LAUNCHER="accelerate launch \
     --num_machines $SLURM_NNODES \
     "
  
-export SCRIPT="training.py --model ddpm_2d"
+export SCRIPT="training.py --model ddpm_3d"
 
     
 # This step is necessary because accelerate launch does not handle multiline arguments properly

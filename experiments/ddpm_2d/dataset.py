@@ -91,7 +91,7 @@ class BratsSliceDataset(torch.utils.data.Dataset):
             ]
         )
         tensor = preprocess(pil_img)
-        return {"images": tensor}
+        return tensor
 
 
 def create_dataset(brats_root: Path, image_size: int, debug: bool):
