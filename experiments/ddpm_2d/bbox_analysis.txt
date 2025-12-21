@@ -1,0 +1,74 @@
+
+log_file: /home/scc/ml8238/mri-diffusion/slurm-1596106.out
+======================================================================
+BRATS DATASET BOUNDING BOX ANALYSIS REPORT
+======================================================================
+
+Total slices analyzed: 40032
+
+Original volume shapes found: {(240, 240, 155)}
+
+----------------------------------------------------------------------
+WIDTH STATISTICS (pixels)
+----------------------------------------------------------------------
+min            :   84.00
+max            :  208.00
+mean           :  163.54
+median         :  164.00
+std            :   10.42
+percentile_5   :  147.00
+percentile_95  :  179.00
+
+----------------------------------------------------------------------
+HEIGHT STATISTICS (pixels)
+----------------------------------------------------------------------
+min            :  104.00
+max            :  156.00
+mean           :  133.01
+median         :  133.00
+std            :    6.02
+percentile_5   :  123.00
+percentile_95  :  143.00
+
+======================================================================
+GLOBAL BOUNDING BOX (union of all slices)
+======================================================================
+Top (min_row)   : 39
+Left (min_col)  : 10
+Height          : 158
+Width           : 219
+
+Crop coordinates for dataset.py:
+  crop_top    = 39
+  crop_left   = 10
+  crop_height = 158
+  crop_width  = 219
+
+======================================================================
+RECOMMENDED CROP DIMENSIONS
+======================================================================
+
+Based on 95th percentile (captures 95% of content):
+  Recommended crop: 143 x 179
+  Aspect ratio: 1.252
+
+For square crop (to avoid distortion):
+  Recommended crop: 179 x 179
+  Note: This may include some background but avoids distortion
+
+For tight crop (median, may cut some content):
+  Recommended crop: 133 x 164
+  Note: ~50% of slices may be slightly cropped
+
+======================================================================
+
+Visualizing global bounding box...
+Global bbox visualization saved to global_bbox_visualization.png
+
+Detecting outliers...
+Found 300 width outliers
+Found 7 height outliers
+Showing 8 most extreme examples per category
+Outlier comparison saved to outlier_comparison.png
+
+Visualization saved to crop_analysis.png

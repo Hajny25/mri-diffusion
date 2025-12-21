@@ -23,9 +23,9 @@ class BratsSliceDataset(torch.utils.data.Dataset):
             self,
             root_dir: Path,
             image_size: int,
-            slice_axis: int = 2,
-            slices_per_case: int = 12,
-            modalities: tuple[str, ...] = ("flair",),
+            slice_axis: int = config.slice_axis,
+            slices_per_case: int = config.slices_per_case,
+            modalities: tuple[str, ...] = config.modalities,
             max_cases: int = None,
     ):
         self.root_dir = Path(root_dir)
@@ -82,10 +82,18 @@ class BratsSliceDataset(torch.utils.data.Dataset):
             slice_2d /= max_val
         pil_img = Image.fromarray((slice_2d * 255).astype(np.uint8))
 
+        crop_top = 32       # min(all min_rows) with small margin
+        crop_left = 8      # min(all min_cols) with small margin  
+        crop_height = 168   # max(all max_rows) - min(all min_rows) + margin
+        crop_width = 224    # max(all max_cols) - min(all min_cols) + margin
+        
         preprocess = transforms.Compose(
             [
-                transforms.Resize((self.image_size, self.image_size)),
-                transforms.RandomHorizontalFlip(),
+                # Crop to exact bounding box (rectangular is fine)
+                transforms.Lambda(lambda img: transforms.functional.crop(
+                    img, crop_top, crop_left, crop_height, crop_width
+                )),
+                transforms.Resize((self.image_size, self.image_size)),  # Resize rectangular to square
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -98,8 +106,5 @@ def create_dataset(brats_root: Path, image_size: int, debug: bool):
     return BratsSliceDataset(
         root_dir=brats_root,
         image_size=image_size,
-        slice_axis=config.slice_axis,
-        slices_per_case=config.slices_per_case,
-        modalities=config.modalities,
         max_cases=None if not debug else 1
     )
