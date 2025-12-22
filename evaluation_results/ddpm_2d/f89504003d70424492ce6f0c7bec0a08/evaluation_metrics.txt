@@ -1,0 +1,15 @@
+============================================================
+DIFFUSION MODEL EVALUATION RESULTS
+============================================================
+
+Checkpoint: output/f89504003d70424492ce6f0c7bec0a08/best_model
+Number of samples: 100
+Image size: 128x128
+
+Metrics:
+------------------------------------------------------------
+fid: 60.752277
+kid_x1000: 3.689289
+avg_pairwise_distance: 19.737963
+std_pairwise_distance: 6.057849
+pixel_variance: 0.013009

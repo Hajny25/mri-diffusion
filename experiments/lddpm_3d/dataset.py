@@ -5,7 +5,9 @@ import random
 import nibabel as nib
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
+
 
 
 def _normalize_volume(vol, eps=1e-6, clip_val=5.0):
@@ -40,69 +42,21 @@ def _normalize_volume(vol, eps=1e-6, clip_val=5.0):
 
     return vol
 
-
-def _pad_to_min_shape(vol, target_shape):
+def _resize_volume(vol, target_shape):
     """
-    vol: (C, D, H, W)
+    vol: (C, D, H, W) numpy array
     target_shape: (D, H, W)
-    Symmetric zero-padding if needed.
     """
-    c, d, h, w = vol.shape
+    vol_t = torch.from_numpy(vol).unsqueeze(0).float()  # (1, C, D, H, W)
     td, th, tw = target_shape
-
-    pd = max(td - d, 0)
-    ph = max(th - h, 0)
-    pw = max(tw - w, 0)
-
-    pad_before_d = pd // 2
-    pad_after_d = pd - pad_before_d
-    pad_before_h = ph // 2
-    pad_after_h = ph - pad_before_h
-    pad_before_w = pw // 2
-    pad_after_w = pw - pad_before_w
-
-    if pd > 0 or ph > 0 or pw > 0:
-        vol = np.pad(
-            vol,
-            (
-                (0, 0),
-                (pad_before_d, pad_after_d),
-                (pad_before_h, pad_after_h),
-                (pad_before_w, pad_after_w),
-            ),
-            mode="constant",
-        )
+    vol_t = F.interpolate(
+        vol_t,
+        size=(td, th, tw),
+        mode="trilinear",
+        align_corners=False,
+    )
+    vol = vol_t.squeeze(0).numpy()  # (C, D, H, W)
     return vol
-
-
-def _random_or_center_crop(vol, patch_size, random_crop=True):
-    """
-    vol: (C, D, H, W), already padded to at least patch_size.
-    patch_size: (D, H, W)
-    """
-    c, d, h, w = vol.shape
-    pd, ph, pw = patch_size
-
-    if d < pd or h < ph or w < pw:
-        raise ValueError("Volume is smaller than patch even after padding.")
-
-    if random_crop:
-        max_z = d - pd
-        max_y = h - ph
-        max_x = w - pw
-        start_z = random.randint(0, max_z) if max_z > 0 else 0
-        start_y = random.randint(0, max_y) if max_y > 0 else 0
-        start_x = random.randint(0, max_x) if max_x > 0 else 0
-    else:
-        start_z = (d - pd) // 2
-        start_y = (h - ph) // 2
-        start_x = (w - pw) // 2
-
-    end_z = start_z + pd
-    end_y = start_y + ph
-    end_x = start_x + pw
-
-    return vol[:, start_z:end_z, start_y:end_y, start_x:end_x]
 
 
 class BraTS3DDataset(Dataset):
@@ -118,11 +72,9 @@ class BraTS3DDataset(Dataset):
             self,
             root_dir,
             patch_size=(64, 64, 64),
-            random_crop=True,
             modalities=("flair",),
             max_cases=None,
-            augment=True,
-            debug: bool = False,
+            xy_bbox: tuple[int, int, int, int] = None
     ):
         """
         root_dir: path to BraTS root (recursively searched for *_flair.nii.gz)
@@ -134,23 +86,21 @@ class BraTS3DDataset(Dataset):
         super().__init__()
         self.root_dir = Path(root_dir)
         self.patch_size = patch_size
-        self.random_crop = random_crop
         self.modalities = modalities
         self.max_cases = max_cases
-        self.augment = augment and random_crop  # Only augment during training
+        self.xy_bbox = xy_bbox
 
         self.cases = self._find_cases()
         if len(self.cases) == 0:
             raise ValueError(f"No BraTS cases found in {root_dir}")
 
-        print(f"Found {len(self.cases)} BraTS subjects with {len(self.modalities)} modality(ies)")
-        print(f"Found {len(self.cases)} BraTS subjects.")
+        print(f"Found {len(self.cases)} BraTS subjects with {len(self.modalities)} modality(ies).")
 
     def _find_cases(self):
-        cases = sorted(list(self.root_dir.rglob("*_flair.nii.gz")))
+        cases = []
+        flair_files = sorted(list(self.root_dir.rglob("*_flair.nii.gz")))
         if self.max_cases is not None:
             flair_files = flair_files[:self.max_cases]
-            flair_files = flair_files[:5]
         for flair_path in flair_files:
             flair_path = Path(flair_path)
             base = str(flair_path).replace("_flair.nii.gz", "")
@@ -170,8 +120,8 @@ class BraTS3DDataset(Dataset):
 
     def _load_volume(self, paths):
         """
-        paths: tuple of 4 paths (one per modality)
-        Returns np.array (4, D, H, W)
+        paths: tuple of paths (one per modality)
+        Returns np.array (C, D, H, W)
         """
         vols = []
         for p in paths:
@@ -184,53 +134,35 @@ class BraTS3DDataset(Dataset):
                 vol = vol[..., 0]
             vol = np.transpose(vol, (2, 0, 1))  # (D, H, W)
 
+            # If an in-plane bounding box is given, crop in (H, W)
+            if self.xy_bbox is not None:
+                y_min, y_max, x_min, x_max = self.xy_bbox
+                # vol: (D, H, W) -> keep all D, crop H and W
+                vol = vol[:, y_min:y_max, x_min:x_max]
+
             vol = _normalize_volume(vol)
             vols.append(vol)
 
         vol = np.stack(vols, axis=0)  # (C=4, D, H, W)
 
-        # Pad if needed
-        vol = _pad_to_min_shape(vol, self.patch_size)
+        vol = _resize_volume(vol, (128, 128, 192))
 
-        # Crop
-        vol = _random_or_center_crop(vol, self.patch_size, self.random_crop)
-
-        return vol
-
-    def augment_volume(self, vol):
-        """
-        Apply random augmentations to volume.
-        vol: (C, D, H, W) numpy array
-        """
-        # Random flips along each axis
-        if random.random() > 0.5:
-            vol = np.flip(vol, axis=1).copy()  # Flip depth
-        if random.random() > 0.5:
-            vol = np.flip(vol, axis=2).copy()  # Flip height
-        if random.random() > 0.5:
-            vol = np.flip(vol, axis=3).copy()  # Flip width
-        
         return vol
     
     def __getitem__(self, idx):
         paths = self.cases[idx]
         vol = self._load_volume(paths)
         
-        # Apply augmentation if enabled
-        if self.augment:
-            vol = self._augment_volume(vol)
-        
-        vol = torch.from_numpy(vol).float()  # (C
-        vol = torch.from_numpy(vol).float()  # (4, D, H, W)
+        vol = torch.from_numpy(vol).float()  # (C, D, H, W)
         return vol
 
-def create_dataset(root: Path, patch_size=(64, 64, 64), max_cases=None, modalities=("flair",), random_crop=True, augment=True):
+def create_dataset(root: Path, patch_size=(64, 64, 64), max_cases=None, modalities=("flair",), xy_bbox=None):
     """Create a BRATS 3D dataset."""
+    d, h, w = 155, 160, 224
+    xy_bbox = (10, 10 + h, 39, 39 + w) # y_min, y_max, x_min, x_max
     return BraTS3DDataset(
         root_dir=root,
-        patch_size=patch_size,
+        patch_size=(d, h, w),
         modalities=modalities,
-        random_crop=random_crop,
         max_cases=max_cases,
-        augment=augment,
     )

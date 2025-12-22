@@ -12,6 +12,7 @@ slurm-*.out
 *.swp
 nvidia-smi*.log
 output
+logs
 mlruns
 perun_results
 ddpm*/samples
