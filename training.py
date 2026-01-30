@@ -18,6 +18,8 @@ from diffusers.utils import make_image_grid
 from accelerate import Accelerator
 from pathlib import Path
 
+from experiment import Experiment
+
 
 BASE_DIR = Path(__file__).resolve().parent
 BRATS_ROOT = Path(BASE_DIR / "data" / "brats-2021").expanduser()
@@ -27,7 +29,7 @@ if not BRATS_ROOT.exists():
 
 output_dir = "output" # gets set later to include mlflow run id
 
-DEBUG = False
+DEBUG = True
 
 
 @dataclass
@@ -110,7 +112,7 @@ def evaluate(config, epoch, pipeline):
     data_out=str(BASE_DIR / "perun_results" / str(accelerator.process_index)),
     format="json",
 )
-def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id):
+def train_loop(config, experiment, model, noise_scheduler, optimizer, train_dataloader, lr_scheduler, run_id):
     # (2) add the data collected by perun to mlflow
     perun.register_callback(log_perun_metrics_to_mlflow)
 
@@ -149,9 +151,7 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
             noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
 
             with accelerator.accumulate(model):
-                # Predict the noise residual
-                noise_pred = model(noisy_images, timesteps)
-                loss = F.mse_loss(noise_pred, noise)
+                loss = experiment.calculate_loss(noisy_images, timesteps, clean_images, model)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -260,11 +260,10 @@ def main():
     parser.add_argument("--model", type=str, required=True)
     args = parser.parse_args()
 
-    model_module = importlib.import_module(f"experiments.{args.model}.model")
-    model = getattr(model_module, "create_model")(config.image_size)
+    experiment = Experiment.instance(args.model)
 
-    dataset_module = importlib.import_module(f"experiments.{args.model}.dataset")
-    dataset = getattr(dataset_module, "create_dataset")(BRATS_ROOT, config.image_size, DEBUG)
+    model = experiment.get_model()
+    dataset = experiment.get_dataset(BRATS_ROOT, DEBUG)
 
     train_dataloader = torch.utils.data.DataLoader(
         dataset,

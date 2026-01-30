@@ -3,7 +3,6 @@ Evaluation script for trained 3D VAE.
 Computes reconstruction metrics and saves visualizations.
 """
 
-import os
 from pathlib import Path
 from dataclasses import dataclass
 import argparse
@@ -16,7 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from vae import VAE3D, get_vae_small, get_vae_base, get_vae_large
+from vae import VAE3D
 from dataset import create_dataset
 
 
@@ -32,6 +31,11 @@ class EvalConfig:
     save_dir: str = "output/vae_eval"
     save_reconstructions: bool = True
     num_visualizations: int = 5  # Number of cases to save as .nii.gz
+
+    # Model
+    base_channels: int = 32
+    modalities: int = ("t1", "flair", "t1ce", "t2")
+    latent_channels: int = 8
 
 
 def compute_metrics(original, reconstructed):
@@ -141,7 +145,11 @@ def evaluate(config: EvalConfig):
     # load model
     state_dict = torch.load(config.checkpoint_path, map_location='cpu')
     
-    vae = get_vae_base()
+    vae = VAE3D(
+        in_channels=len(config.modalities),
+        base_channels=config.base_channels,
+        latent_channels=config.latent_channels,
+    )
     
     vae.load_state_dict(state_dict)
     vae.eval()
@@ -152,6 +160,7 @@ def evaluate(config: EvalConfig):
         root=Path(config.data_root),
         patch_size=config.patch_size,
         max_cases=config.max_cases,
+        modalities=config.modalities
     )
     
     val_loader = DataLoader(

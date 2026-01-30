@@ -266,8 +266,8 @@ def vae_loss(reconstruction, target, mean, logvar, kl_weight=1.0):
     #logvar = torch.clamp(logvar, min=-10.0, max=10.0)
     
     # KL divergence: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    #kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=(1, 2, 3, 4)).mean()
-    kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+    kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=(1, 2, 3, 4)).mean()
+    #kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
     
     # Total loss
     total_loss = recon_loss + kl_weight * kl_loss

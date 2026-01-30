@@ -24,9 +24,10 @@ nvidia-smi --list-gpus
 
 ######################
 
-# Usage: sbatch eval.sh <experiment_dir> <checkpoint_subdir_or_path> [num_samples]
-# Example 1 (auto-detect latest run): sbatch eval.sh ddpm_2d best_model 100
-# Example 2 (manual path): sbatch eval.sh ddpm_2d output/abc123/best_model 100
+# Usage: sbatch eval_vae.sh  <checkpoint_subdir_or_path> 
+# Example 1 (auto-detect latest run): sbatch eval_vae.sh best_model 
+# Example 2 (use best model of auto-detected latest run per default): sbatch eval_vae.sh
+# Example 3 (manual path): sbatch eval_vae.sh output/abc123/best_model 
 
 CHECKPOINT=${1:-"best_model.pt"}
 

@@ -4,7 +4,7 @@ Training script for 3D VAE on BRATS dataset.
 
 import os
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, random_split
 from accelerate import Accelerator
 import mlflow
 
-from vae import get_vae_small, get_vae_base, vae_loss
+from vae import VAE3D, vae_loss
 from dataset import BraTS3DDataset
 
 
@@ -26,9 +26,11 @@ DEBUG = os.getenv("DEBUG", "0") == "1" or False
 class VAETrainingConfig:
     # Data
     patch_size: tuple = (144, 144, 192)
+    modalities: tuple = ("flair", "t1", "t1ce", "t2")
     
     # Model
-    model_size: str = "base"  # tiny, small, base, large
+    base_channels: int = 32
+    latent_channels: int = 8
     
     # Training
     batch_size: int = 1 if not DEBUG else 1
@@ -181,7 +183,9 @@ def main():
     accelerator.print("3D VAE Training for BRATS")
     accelerator.print("="*70)
     accelerator.print(f"Patch size: {config.patch_size}")
-    accelerator.print(f"Model size: {config.model_size}")
+    accelerator.print(f"Modalities: {config.modalities}")
+    accelerator.print(f"Model base channels: {config.base_channels}")
+    accelerator.print(f"Model latent channels: {config.latent_channels}")
     accelerator.print(f"Batch size: {config.batch_size}")
     accelerator.print(f"Epochs: {config.num_epochs}")
     accelerator.print(f"KL weight: {config.kl_weight}")
@@ -196,7 +200,7 @@ def main():
     full_dataset = BraTS3DDataset(
         root_dir=BRATS_ROOT,
         patch_size=config.patch_size,
-        modalities=("flair",),
+        modalities=("flair", "t1", "t1ce", "t2"),
         max_cases=10 if DEBUG else None,
     )
     
@@ -232,18 +236,12 @@ def main():
     
     # Create model
     accelerator.print("Creating model...")
-    if config.model_size == "tiny":
-        from vae import get_vae_tiny
-        model = get_vae_tiny()
-    elif config.model_size == "small":
-        model = get_vae_small()
-    elif config.model_size == "base":
-        model = get_vae_base()
-    elif config.model_size == "large":
-        from vae import get_vae_large
-        model = get_vae_large()
-    else:
-        raise ValueError(f"Unknown model size: {config.model_size}")
+    model = VAE3D(
+        in_channels=len(config.modalities),
+        base_channels=config.base_channels,
+        latent_channels=config.latent_channels,
+    )
+    accelerator.print(f"Model: {model}")
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -259,22 +257,14 @@ def main():
     
     # MLflow setup
     if accelerator.is_main_process:
-        mlflow.set_experiment("vae_3d")
+        mlflow.set_experiment("vae_3d_all_modalities")
         mlflow.start_run()
         run_id = mlflow.active_run().info.run_id
         accelerator.print(f"MLflow run ID: {run_id}")
         
         # Log config
-        mlflow.log_params({
-            "patch_size": str(config.patch_size),
-            "model_size": config.model_size,
-            "batch_size": config.batch_size,
-            "num_epochs": config.num_epochs,
-            "learning_rate": config.learning_rate,
-            "kl_weight": config.kl_weight,
-            "kl_warmup_epochs": config.kl_warmup_epochs,
-            "num_params": num_params,
-        })
+        mlflow.log_params(asdict(config))
+        mlflow.log_param("num_params", num_params)
         
         output_dir = f"output/vae_{run_id}"
         os.makedirs(output_dir, exist_ok=True)

@@ -25,8 +25,6 @@ BRATS_ROOT = Path(BASE_DIR / "data" / "brats-2021").expanduser()
 if not BRATS_ROOT.exists():
     raise FileNotFoundError(f"Expected BRATS2021 data under {BRATS_ROOT}")
 
-output_dir = "output" # gets set later to include mlflow run id
-
 DEBUG = False
 
 
@@ -132,7 +130,7 @@ def validate(config, model, noise_scheduler, val_dataloader, run_id, epoch):
     return avg_val_loss
 
 
-def evaluate(config, epoch, pipeline):
+def evaluate(config, epoch, pipeline, output_dir):
     # Sample some images from random noise (this is the backward diffusion process).
     # The default pipeline output type is `List[PIL.Image]`
     images = pipeline(
@@ -157,7 +155,7 @@ def evaluate(config, epoch, pipeline):
     data_out=str(BASE_DIR / "perun_results" / str(accelerator.process_index)),
     format="json",
 )
-def train_loop(config, model: UNet2DModel, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id):
+def train_loop(config, model: UNet2DModel, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id, output_dir):
     # (2) add the data collected by perun to mlflow
     perun.register_callback(log_perun_metrics_to_mlflow)
 
@@ -245,7 +243,7 @@ def train_loop(config, model: UNet2DModel, noise_scheduler, optimizer, train_dat
 
             if (epoch + 1) % config.save_image_epochs == 0 or epoch == config.num_epochs - 1:
                 accelerator.print(f"sample demo images in epoch: {epoch + 1}")
-                evaluate(config, epoch, pipeline)
+                evaluate(config, epoch, pipeline, output_dir)
 
 
     accelerator.wait_for_everyone()
@@ -316,10 +314,6 @@ def start_mlflow_run(experiment: str) -> str:
         run = mlflow.active_run().info.run_id
         print(f"MLflow run id: {run}")
 
-        global output_dir
-        output_dir = os.path.join("output", run)
-        os.makedirs(output_dir, exist_ok=True)
-
     run_id = accelerate.utils.gather_object([run])[0]
     return run_id
 
@@ -388,8 +382,10 @@ def main():
     )
 
     run_id = start_mlflow_run("ddpm2d")
+    output_dir = os.path.join("output", "ddpm_2d", run_id)
+    os.makedirs(output_dir, exist_ok=True)
 
-    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id)
+    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id, output_dir)
 
 
 if __name__ == "__main__":
