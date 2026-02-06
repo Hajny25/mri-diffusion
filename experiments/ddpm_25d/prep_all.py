@@ -4,12 +4,11 @@ from pathlib import Path
 import time
 
 import numpy as np
-import torch
 import torch.nn.functional as F
 
 NUM_SLICES = 155
 
-def preprocess_volume(volume_path: Path, image_size: int, masks: bool =False):
+def preprocess_volume(volume_path: Path, image_size: int, masks: bool=False):
     """
     - Finds all *flair.nii.gz files
     - Uses central 80% slices from each volume

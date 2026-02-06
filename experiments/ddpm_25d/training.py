@@ -1,3 +1,4 @@
+import time
 import os
 from dataclasses import dataclass, asdict
 
@@ -15,7 +16,8 @@ from accelerate import Accelerator
 from pathlib import Path
 
 from preprocessed_dataset import PreprocessedBraTSSliceDataset
-from model import UNetSlicePredictor
+from mm_dataset import MemmapDataset, get_debug_dataset, get_full_dataset, get_full_masks_dataset
+from model import UNetSlicePredictor, UNetSlicePredictorAttention
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -26,25 +28,24 @@ PREPROCESSED_MASKS_ROOT = Path(BASE_DIR / "data" / "preprocessed_masks").expandu
 if not BRATS_ROOT.exists():
     raise FileNotFoundError(f"Expected BRATS2021 data under {BRATS_ROOT}")
 
-output_dir = "output" # gets set later to include mlflow run id
-
 DEBUG = False
 
 
 @dataclass
 class TrainingConfig:
     image_size: int = 128  # the generated image resolution
-    train_batch_size: int = 128 if not DEBUG else 1
-    eval_batch_size: int = 128 if not DEBUG else 1
-    num_epochs: int = 30 if not DEBUG else 1
+    train_batch_size: int = 50 if not DEBUG else 1
+    eval_batch_size: int = 50 if not DEBUG else 1
+    num_epochs: int = 100 if not DEBUG else 1
     gradient_accumulation_steps: int = 1
     learning_rate: float = 1e-4
     lr_warmup_steps: int = 500
     save_image_epochs: int = 1
+    log_mlflow_iterations: int = 100
     mixed_precision: str = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
     seed: int = 0
     scheduler: str = "DDPMScheduler"
-    dataloader_workers: int = 8 if not DEBUG else 0 
+    dataloader_workers: int = 16 if not DEBUG else 0 
     num_train_timesteps: int = 1000 if not DEBUG else 10
     num_inference_steps = 1000 if not DEBUG else 10
 
@@ -142,7 +143,7 @@ def validate(config, model, noise_scheduler, val_dataloader, run_id, epoch):
     data_out=str(BASE_DIR / "perun_results" / str(accelerator.process_index)),
     format="json",
 )
-def train_loop(config, model: UNetSlicePredictor, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id):
+def train_loop(config, model: UNetSlicePredictor, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id, output_dir):
     # (2) add the data collected by perun to mlflow
     perun.register_callback(log_perun_metrics_to_mlflow)
 
@@ -202,9 +203,10 @@ def train_loop(config, model: UNetSlicePredictor, noise_scheduler, optimizer, tr
                 optimizer.zero_grad()
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "step": global_step}
-            # (6) log the training loss and learning rate
-            mlflow.log_metric("training_loss", logs["loss"], step=global_step, run_id=run_id)
-            mlflow.log_metric("learning_rate", logs["lr"], step=global_step, run_id=run_id)
+            if step % config.log_mlflow_iterations == 0:
+                # (6) log the training loss and learning rate
+                mlflow.log_metric("training_loss", logs["loss"], step=global_step, run_id=run_id)
+                mlflow.log_metric("learning_rate", logs["lr"], step=global_step, run_id=run_id)
 
             global_step += 1
 
@@ -300,18 +302,17 @@ def start_mlflow_run(experiment: str) -> str:
         run = mlflow.active_run().info.run_id
         print(f"MLflow run id: {run}")
 
-        global output_dir
-        output_dir = os.path.join("output", run)
-        os.makedirs(output_dir, exist_ok=True)
-
     run_id = accelerate.utils.gather_object([run])[0]
     return run_id
 
 def main():
-    checkpoint = BASE_DIR / "output/54ff105b5d53495c9652bfc8fe9a6861/best_model.pt"
-    # checkpoint = None
+    resume = False
+    if resume:
+        checkpoint = BASE_DIR / "output/76539c916ce8437e8aa4def52d3625dc/best_model.pt"
+    else:
+        checkpoint = None
 
-    model = UNetSlicePredictor()
+    model = UNetSlicePredictorAttention()
     if checkpoint:
         state_dict = torch.load(checkpoint, map_location="cpu")
         model.load_state_dict(state_dict)
@@ -319,7 +320,8 @@ def main():
     model.train()
 
     # Create full dataset and split into train/validation
-    full_dataset = PreprocessedBraTSSliceDataset(PREPROCESSED_ROOT, config.image_size)
+    #full_dataset = PreprocessedBraTSSliceDataset(PREPROCESSED_ROOT, config.image_size)
+    full_dataset = get_full_masks_dataset()
     
     # Split dataset: 80% train, 20% validation
     train_size = int(0.8 * len(full_dataset))
@@ -360,8 +362,10 @@ def main():
     )
 
     run_id = start_mlflow_run("ddpm2.5d")
+    output_dir = os.path.join("output", "ddpm_25d", run_id)
+    os.makedirs(output_dir, exist_ok=True)
 
-    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id)
+    train_loop(config, model, noise_scheduler, optimizer, train_dataloader, val_dataloader, lr_scheduler, run_id, output_dir)
 
 
 if __name__ == "__main__":

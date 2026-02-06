@@ -1,14 +1,13 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from pathlib import Path
 
 NUM_SLICES = 155
 
 class MemmapDataset(Dataset):
-    def __init__(self, path):
-        # self.data = np.load(path, mmap_mode="r")  # read-only memmap
-        self.data = np.memmap(path, mode='r', shape=(1251, 155, 1, 128, 128), dtype=np.float32)
-        print(f"{self.data.shape=}")
+    def __init__(self, path, shape=(1251, 155, 1, 128, 128)):
+        self.data = np.memmap(path, mode='r', shape=shape, dtype=np.float32)
         self.num_slices = self.data.shape[1]
         self.num_datapoints_per_vol = 2 * (self.num_slices - 1)
 
@@ -30,3 +29,15 @@ class MemmapDataset(Dataset):
             "direction": direction,         # -1 for above, +1 for below
             "slice_pos": slice_idx / self.num_slices - 1,        
         }
+
+def get_debug_dataset():
+    return MemmapDataset(Path(__file__).resolve().parents[2] / "data" / "preprocessed_all_debug.npy", (10, 155, 1, 128, 128))
+
+def get_full_dataset():
+    return MemmapDataset(Path(__file__).resolve().parents[2] / "data" / "preprocessed_all.npy", (1251, 155, 1, 128, 128))
+
+def get_debug_masks_dataset():
+    return MemmapDataset(Path(__file__).resolve().parents[2] / "data" / "preprocessed_all_masks_debug.npy", (10, 155, 1, 128, 128))
+
+def get_full_masks_dataset():
+    return MemmapDataset(Path(__file__).resolve().parents[2] / "data" / "preprocessed_all_masks.npy", (1251, 155, 1, 128, 128))
