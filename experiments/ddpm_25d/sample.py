@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from model import UNetSlicePredictor
+from model import UNetSlicePredictorAttention
 from preprocessed_dataset import PreprocessedBraTSSliceDataset
 from diffusers import DDPMScheduler
 
@@ -12,7 +12,7 @@ BATCH_SIZE = 20
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
-    model = UNetSlicePredictor()
+    model = UNetSlicePredictorAttention()
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict)
     model.to(device)
@@ -116,7 +116,7 @@ def main():
     print(f"Using {device=}")
     print(f"{__file__=}")
 
-    checkpoint_path = BASE_DIR / "output/54ff105b5d53495c9652bfc8fe9a6861/best_model.pt"
+    checkpoint_path = BASE_DIR / "output/76539c916ce8437e8aa4def52d3625dc/best_model.pt"
 
     # 1) Load model and scheduler
     model = load_model(checkpoint_path, device)
@@ -154,7 +154,7 @@ def main():
     )
 
     # 5) Visualize context vs predicted vs target
-    show_triplets(context, predicted, target, BASE_DIR / "sample_output.png", n_show=BATCH_SIZE)
+    show_triplets(context, predicted, target, BASE_DIR / "sample_output_attn.png", n_show=BATCH_SIZE)
 
 
 if __name__ == "__main__":

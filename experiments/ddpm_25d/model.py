@@ -2,11 +2,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from monai.networks.blocks.spatialattention import SpatialAttentionBlock
 
 class DoubleConv(nn.Module):
     """(Conv => GroupNorm => SiLU) * 2, with optional FiLM conditioning."""
-    def __init__(self, in_ch, out_ch, time_emb_dim=0):
+    def __init__(self, in_ch, out_ch, time_emb_dim=0, with_attention=False):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
@@ -47,22 +47,26 @@ class DoubleConv(nn.Module):
 
 
 class Down(nn.Module):
-    def __init__(self, in_ch, out_ch, time_emb_dim=0):
+    def __init__(self, in_ch, out_ch, time_emb_dim=0, with_attention=False):
         super().__init__()
         self.pool = nn.MaxPool2d(2)
         self.conv = DoubleConv(in_ch, out_ch, time_emb_dim)
+        self.attention = SpatialAttentionBlock(spatial_dims=2, num_channels=out_ch, num_head_channels=8) if with_attention else None
 
     def forward(self, x, emb=None):
         x = self.pool(x)
         x = self.conv(x, emb)
+        if self.attention is not None:
+            x = self.attention(x)
         return x
 
 
 class Up(nn.Module):
-    def __init__(self, in_ch, skip_ch, out_ch, time_emb_dim=0):
+    def __init__(self, in_ch, skip_ch, out_ch, time_emb_dim=0, with_attention=False):
         super().__init__()
         self.up = nn.ConvTranspose2d(in_ch, in_ch // 2, kernel_size=2, stride=2)
         self.conv = DoubleConv(in_ch // 2 + skip_ch, out_ch, time_emb_dim)
+        self.attention = SpatialAttentionBlock(spatial_dims=2, num_channels=out_ch, num_head_channels=8) if with_attention else None
 
     def forward(self, x, skip, emb=None):
         x = self.up(x)
@@ -75,6 +79,8 @@ class Up(nn.Module):
 
         x = torch.cat([skip, x], dim=1)
         x = self.conv(x, emb)
+        if self.attention is not None:
+            x = self.attention(x)
         return x
 
 
@@ -184,6 +190,71 @@ class UNetSlicePredictor(nn.Module):
         x4 = self.down3(x3, emb)
 
         xb = self.bot(x4, emb)
+
+        x = self.up1(xb, x3, emb)
+        x = self.up2(x, x2, emb)
+        x = self.up3(x, x1, emb)
+        out = self.outc(x)
+
+        return out
+
+class UNetSlicePredictorAttention(nn.Module):
+    """
+    UNet that predicts noise (or target slice) for the neighbor, conditioned on:
+      - noisy neighbor slice x_t
+      - center slice (condition)
+      - timestep t
+      - direction (-1 or +1)
+    """
+
+    def __init__(self, in_channels=2, out_channels=1, base_channels=64, time_emb_dim=128):
+        """
+        in_channels:
+            2 if you concatenate [noisy_neighbor, center_slice]
+        out_channels:
+            1 if you predict a single-channel slice or noise
+        """
+        super().__init__()
+
+        self.time_dir_slice_emb = TimeDirSliceEmbedding(time_emb_dim)
+
+        self.inc = DoubleConv(in_channels, base_channels, time_emb_dim)
+        self.down1 = Down(base_channels, base_channels * 2, time_emb_dim)
+        self.down2 = Down(base_channels * 2, base_channels * 4, time_emb_dim)
+        self.down3 = Down(base_channels * 4, base_channels * 4, time_emb_dim, with_attention=True)
+
+        self.mid1 = DoubleConv(base_channels * 4, base_channels * 4, time_emb_dim)
+        self.attn1 = SpatialAttentionBlock(spatial_dims=2,num_channels=base_channels * 4, num_head_channels=8)
+        self.mid2 = DoubleConv(base_channels * 4, base_channels * 4, time_emb_dim)
+        self.attn2 = SpatialAttentionBlock(spatial_dims=2,num_channels=base_channels * 4, num_head_channels=8)
+        self.mid3 = DoubleConv(base_channels * 4, base_channels * 4, time_emb_dim)
+
+        self.up1 = Up(base_channels * 4, base_channels * 4, base_channels * 4, time_emb_dim, with_attention=True)
+        self.up2 = Up(base_channels * 4, base_channels * 2, base_channels * 2, time_emb_dim)
+        self.up3 = Up(base_channels * 2, base_channels, base_channels, time_emb_dim)
+
+        self.outc = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+
+    def forward(self, x, t, direction, slice_pos):
+        """
+        x: [B, 2, H, W]
+           channel 0: noisy neighbor slice (x_t)
+           channel 1: conditioning slice
+        t: [B] diffusion timesteps
+        direction: [B] in {-1, +1}
+        """
+        emb = self.time_dir_slice_emb(t, direction, slice_pos)  # [B, time_emb_dim]
+
+        x1 = self.inc(x, emb)
+        x2 = self.down1(x1, emb)
+        x3 = self.down2(x2, emb)
+        x4 = self.down3(x3, emb)
+
+        xb = self.mid1(x4, emb)
+        xb = self.attn1(xb)
+        xb = self.mid2(xb, emb)
+        xb = self.attn2(xb)
+        xb = self.mid3(xb, emb)
 
         x = self.up1(xb, x3, emb)
         x = self.up2(x, x2, emb)

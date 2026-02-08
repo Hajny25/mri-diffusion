@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --partition=normal
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --gres=gpu:full:2
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=35
 
 
 # Require the experiment name as argument
@@ -33,8 +33,9 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 export GPUS_PER_NODE=2
 
-LOG_DIR="logs/$1"
 echo "-----------------------------------------------------------"
+LOG_DIR="logs/$1"
+mkdir -p "$LOG_DIR"
 GPU_LOG="$LOG_DIR/gpu_usage_$SLURM_JOB_ID.log"
 nvidia-smi --list-gpus
 nvidia-smi \
@@ -50,6 +51,8 @@ export LAUNCHER="accelerate launch \
     --num_machines $SLURM_NNODES \
     "
  
+
+export PYTHONUNBUFFERED=1
 
 # This step is necessary because accelerate launch does not handle multiline arguments properly
 export CMD="$LAUNCHER $TRAINING_SCRIPT" 

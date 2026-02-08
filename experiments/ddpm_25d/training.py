@@ -321,7 +321,7 @@ def main():
 
     # Create full dataset and split into train/validation
     #full_dataset = PreprocessedBraTSSliceDataset(PREPROCESSED_ROOT, config.image_size)
-    full_dataset = get_full_masks_dataset()
+    full_dataset = get_full_dataset()
     
     # Split dataset: 80% train, 20% validation
     train_size = int(0.8 * len(full_dataset))
