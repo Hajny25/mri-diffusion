@@ -1,5 +1,6 @@
 .env
 venv
+menv
 
 .idea
 .DS_Store
@@ -16,3 +17,4 @@ logs
 mlruns
 perun_results
 ddpm*/samples
+*.pt
